@@ -86,6 +86,12 @@ def load_sheet(spreadsheet_url: str, worksheet_name: str) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
+def get_worksheet(spreadsheet_url: str, worksheet_name: str):
+    client = get_gspread_client()
+    sheet = client.open_by_url(spreadsheet_url)
+    return sheet.worksheet(worksheet_name)
+
+
 def ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
     required = [
         "name",
@@ -93,6 +99,7 @@ def ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
         "telegram",
         "topic",
         "message",
+        "status",
     ]
     for col in required:
         if col not in df.columns:
@@ -107,26 +114,65 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
     for i, row in enumerate(df.fillna("").to_dict("records")):
         message = build_message(row, i)
         durl = dialog_url(row)
+        status = normalize(row.get("status")).lower() or ""
 
         rows.append({
             "name": normalize(row.get("name")),
             "phone": normalize(row.get("phone")),
             "telegram": normalize(row.get("telegram")),
+            "topic": normalize(row.get("topic")),
             "message": message,
+            "status": status,
             "dialog": durl,
             "share": share_url(durl, message),
-            "sent_local": False,
         })
 
     result = pd.DataFrame(rows)
-    for col in ["name", "phone", "telegram", "message", "dialog", "share", "sent_local"]:
+    for col in ["name", "phone", "telegram", "topic", "message", "status", "dialog", "share"]:
         if col not in result.columns:
             result[col] = ""
 
-    if "sent_local" not in result.columns:
-        result["sent_local"] = False
-
     return result.reset_index(drop=True)
+
+
+def update_status_in_sheet(spreadsheet_url: str, worksheet_name: str, filtered_df: pd.DataFrame, filtered_row_index: int, new_status: str) -> None:
+    ws = get_worksheet(spreadsheet_url, worksheet_name)
+    headers = ws.row_values(1)
+
+    if not headers:
+        raise RuntimeError("В листе нет заголовков первой строки.")
+
+    all_records = ws.get_all_records()
+    source_df = pd.DataFrame(all_records)
+    source_df = ensure_required_columns(source_df)
+
+    target_row = filtered_df.iloc[filtered_row_index]
+
+    match_mask = (
+        source_df["name"].astype(str).str.strip().fillna("") == str(target_row["name"]).strip()
+    ) & (
+        source_df["phone"].astype(str).str.strip().fillna("") == str(target_row["phone"]).strip()
+    ) & (
+        source_df["telegram"].astype(str).str.strip().fillna("") == str(target_row["telegram"]).strip()
+    ) & (
+        source_df["topic"].astype(str).str.strip().fillna("") == str(target_row["topic"]).strip()
+    )
+
+    matches = source_df[match_mask]
+
+    if matches.empty:
+        raise RuntimeError("Не удалось найти строку в Google Sheets для обновления статуса.")
+
+    source_index = matches.index[0]
+
+    try:
+        status_col = headers.index("status") + 1
+    except ValueError:
+        status_col = len(headers) + 1
+        ws.update_cell(1, status_col, "status")
+
+    ws.update_cell(source_index + 2, status_col, new_status)
+    load_sheet.clear()
 
 
 def copy_text_button(text: str, key: str) -> None:
@@ -147,6 +193,35 @@ def copy_text_button(text: str, key: str) -> None:
             cursor: pointer;
             font-size: 14px;
         ">Скопировать текст</button>
+        """,
+        height=45,
+    )
+
+
+def open_with_text_button(text: str, url: str, key: str) -> None:
+    if not url:
+        st.button("Открыть диалог с текстом", disabled=True, use_container_width=True, key=key)
+        return
+
+    escaped_text = (
+        text.replace("\\", "\\\\")
+            .replace("`", "\\`")
+            .replace("$", "\\$")
+    )
+    escaped_url = url.replace("&", "&amp;").replace('"', '&quot;')
+
+    st.components.v1.html(
+        f"""
+        <button onclick="navigator.clipboard.writeText(`{escaped_text}`).then(function() {{ window.open('{escaped_url}', '_blank'); }}).catch(function() {{ window.open('{escaped_url}', '_blank'); }});" style="
+            width: 100%;
+            background: #ffffff;
+            color: #222;
+            border: 1px solid #d0d7de;
+            padding: 0.5rem 0.75rem;
+            border-radius: 0.5rem;
+            cursor: pointer;
+            font-size: 14px;
+        ">Открыть диалог с текстом</button>
         """,
         height=45,
     )
@@ -178,9 +253,6 @@ except Exception as e:
     st.code(traceback.format_exc())
     st.stop()
 
-if "sent_map" not in st.session_state:
-    st.session_state.sent_map = {}
-
 st.metric("Всего строк", len(df))
 
 st.markdown("### Таблица")
@@ -194,8 +266,7 @@ else:
         col.markdown(f"**{title}**")
 
     for idx, row in df.iterrows():
-        row_key = f"{row['name']}|{row['phone']}|{row['telegram']}|{idx}"
-        is_sent = st.session_state.sent_map.get(row_key, False)
+        is_sent = normalize(row.get("status")).lower() == "done"
 
         with st.container(border=True):
             cols = st.columns([1.2, 1.0, 1.0, 3.0, 2.1])
@@ -220,20 +291,22 @@ else:
                 else:
                     st.button("Открыть диалог", disabled=True, use_container_width=True, key=f"disabled_open_{idx}")
 
-                if share:
-                    copy_text_button(edited_message, key=f"copy_{idx}")
-                    st.link_button("Открыть диалог с текстом", share, use_container_width=True)
-                else:
-                    st.button("Открыть диалог с текстом", disabled=True, use_container_width=True, key=f"disabled_share_{idx}")
+                copy_text_button(edited_message, key=f"copy_{idx}")
+                open_with_text_button(edited_message, share, key=f"share_{idx}")
 
-                if st.button("Отправлено", key=f"sent_{idx}", use_container_width=True):
-                    st.session_state.sent_map[row_key] = not is_sent
-                    st.rerun()
+                button_label = "Снять отметку" if is_sent else "Отправлено"
+                if st.button(button_label, key=f"sent_{idx}", use_container_width=True):
+                    try:
+                        new_status = "" if is_sent else "done"
+                        update_status_in_sheet(spreadsheet_url, worksheet_name, df, idx, new_status)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Не удалось обновить статус: {e}")
 
-                if st.session_state.sent_map.get(row_key, False):
+                if normalize(row.get("status")).lower() == "done":
                     st.success("Отправлено")
                 else:
                     st.write("")
 
 st.markdown("---")
-st.caption("Это версия под хостинг: без локального буфера и без записи статуса в Google Sheets. Отметка ‘Отправлено’ хранится в текущей сессии браузера.")
+st.caption("Отметка ‘Отправлено’ теперь пишется в Google Sheets в скрытую рабочую колонку status, даже если ты не показываешь её в интерфейсе.")
