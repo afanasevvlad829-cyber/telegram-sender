@@ -95,6 +95,7 @@ def get_worksheet(spreadsheet_url: str, worksheet_name: str):
 def ensure_required_columns(df: pd.DataFrame) -> pd.DataFrame:
     required = [
         "name",
+        "Age",
         "phone",
         "telegram",
         "topic",
@@ -118,6 +119,7 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
 
         rows.append({
             "name": normalize(row.get("name")),
+            "age": normalize(row.get("Age")),
             "phone": normalize(row.get("phone")),
             "telegram": normalize(row.get("telegram")),
             "topic": normalize(row.get("topic")),
@@ -128,7 +130,7 @@ def prepare(df: pd.DataFrame) -> pd.DataFrame:
         })
 
     result = pd.DataFrame(rows)
-    for col in ["name", "phone", "telegram", "topic", "message", "status", "dialog", "share"]:
+    for col in ["name", "age", "phone", "telegram", "topic", "message", "status", "dialog", "share"]:
         if col not in result.columns:
             result[col] = ""
 
@@ -150,6 +152,8 @@ def update_status_in_sheet(spreadsheet_url: str, worksheet_name: str, filtered_d
 
     match_mask = (
         source_df["name"].astype(str).str.strip().fillna("") == str(target_row["name"]).strip()
+    ) & (
+        source_df["Age"].astype(str).str.strip().fillna("") == str(target_row["age"]).strip()
     ) & (
         source_df["phone"].astype(str).str.strip().fillna("") == str(target_row["phone"]).strip()
     ) & (
@@ -237,7 +241,7 @@ with st.sidebar:
     worksheet_name = st.text_input("Название вкладки", value=DEFAULT_WORKSHEET_NAME)
     st.markdown("---")
     st.write("Ожидаемые колонки:")
-    st.code("name | phone | telegram | message")
+    st.code("name | Age | phone | telegram | message")
     st.write("Если message пустой, текст сгенерируется автоматически.")
 
 if not spreadsheet_url:
@@ -260,8 +264,8 @@ st.markdown("### Таблица")
 if df.empty:
     st.warning("В таблице нет строк.")
 else:
-    header = st.columns([1.2, 1.0, 1.0, 3.0, 2.1])
-    headers = ["name", "phone", "telegram", "message", "actions"]
+    header = st.columns([1.1, 0.7, 1.0, 1.0, 3.0, 2.1])
+    headers = ["name", "age", "phone", "telegram", "message", "actions"]
     for col, title in zip(header, headers):
         col.markdown(f"**{title}**")
 
@@ -269,12 +273,13 @@ else:
         is_sent = normalize(row.get("status")).lower() == "done"
 
         with st.container(border=True):
-            cols = st.columns([1.2, 1.0, 1.0, 3.0, 2.1])
+            cols = st.columns([1.1, 0.7, 1.0, 1.0, 3.0, 2.1])
             cols[0].write(row["name"] or "—")
-            cols[1].write(row["phone"] or "—")
-            cols[2].write(row["telegram"] or "—")
+            cols[1].write(row["age"] or "—")
+            cols[2].write(row["phone"] or "—")
+            cols[3].write(row["telegram"] or "—")
 
-            edited_message = cols[3].text_area(
+            edited_message = cols[4].text_area(
                 label=f"message_{idx}",
                 value=row["message"],
                 height=130,
@@ -285,7 +290,7 @@ else:
             dialog = row["dialog"]
             share = share_url(dialog, edited_message)
 
-            with cols[4]:
+            with cols[5]:
                 if dialog:
                     st.link_button("Открыть диалог", dialog, use_container_width=True)
                 else:
